@@ -5,6 +5,7 @@
 
 #include "common.h"
 
+#include <sframe/result.h>
 #include <iostream>
 #include <map>       // for map
 #include <stdexcept> // for invalid_argument

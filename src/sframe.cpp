@@ -150,8 +150,8 @@ Context::unprotect(output_bytes plaintext,
 {
   SFRAME_VALUE_OR_RETURN(header, Header::parse(ciphertext));
   const auto inner_ciphertext = ciphertext.subspan(header.size());
-  return SFRAME_VALUE_OR_THROW(Context::unprotect_inner(
-    header, plaintext, inner_ciphertext, metadata));
+  return Context::unprotect_inner(
+    header, plaintext, inner_ciphertext, metadata);
 }
 
 Result<output_bytes>
