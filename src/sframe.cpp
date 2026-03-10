@@ -81,6 +81,12 @@ Context::Context(CipherSuite suite_in)
 
 Context::~Context() = default;
 
+void
+Context::remove_key(KeyID key_id)
+{
+  keys.erase(key_id);
+}
+
 Result<void>
 Context::add_key(KeyID key_id, KeyUsage usage, input_bytes base_key)
 {
@@ -324,6 +330,17 @@ MLSContext::EpochKeys::base_key(CipherSuite ciphersuite,
 
   return hkdf_expand(
     ciphersuite, sframe_epoch_secret, enc_sender_id, hash_size);
+}
+
+void
+MLSContext::remove_epoch(EpochID epoch_id)
+{
+  purge_epoch(epoch_id);
+
+  const auto idx = epoch_id & epoch_mask;
+  if (idx < epoch_cache.size()) {
+    epoch_cache[idx].reset();
+  }
 }
 
 void
