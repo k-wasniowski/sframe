@@ -147,6 +147,68 @@ protected:
                                        input_bytes metadata);
 };
 
+// RTPContext manages per-SSRC SFrame key derivation and ratcheting. All SSRCs
+// share the same KID (key generation) but each has a unique encryption key
+// derived from a shared session base_key. Ratcheting advances all SSRCs
+// together for forward secrecy.
+class RTPContext
+{
+public:
+  using SSRC = uint32_t;
+
+  RTPContext(CipherSuite suite);
+
+  // Set the session base key at a given generation (KID).
+  // Re-derives keys for all registered SSRCs and resets ratchet state.
+  Result<void> add_key(KeyID key_id, input_bytes base_key);
+
+  // Register an SSRC.  Derives a per-SSRC key from the current base
+  // key, applying any ratchet steps that have already occurred.
+  Result<void> add_ssrc(SSRC ssrc, KeyUsage usage);
+
+  // Ratchet all SSRCs to new_key_id.
+  Result<void> ratchet(KeyID new_key_id);
+
+  // Remove a specific SSRC.
+  void remove_ssrc(SSRC ssrc);
+
+  // Encrypt plaintext for a specific SSRC.
+  Result<output_bytes> protect(SSRC ssrc,
+                               output_bytes ciphertext,
+                               input_bytes plaintext,
+                               input_bytes metadata);
+
+  // Decrypt ciphertext for a specific SSRC, auto-ratcheting all
+  // SSRCs if the KID in the ciphertext is ahead.
+  Result<output_bytes> unprotect(SSRC ssrc,
+                                 output_bytes plaintext,
+                                 input_bytes ciphertext,
+                                 input_bytes metadata);
+
+  static constexpr size_t max_overhead = 17 + 16;
+  static constexpr size_t max_metadata_size = 512;
+
+private:
+  static constexpr size_t max_ssrc_key_size = 64;
+  static constexpr size_t max_base_key_size = 64;
+
+  CipherSuite suite;
+  KeyID current_key_id;
+  owned_bytes<max_base_key_size> base_key;
+  uint64_t ratchet_count;
+
+  struct SSRCRecord
+  {
+    owned_bytes<max_ssrc_key_size> current_ssrc_key;
+    KeyRecord key_record;
+    KeyUsage usage;
+  };
+
+  map<SSRC, SSRCRecord, SFRAME_MAX_KEYS> ssrc_records;
+
+  Result<SSRCRecord> derive_ssrc_record(SSRC ssrc, KeyUsage usage) const;
+};
+
 // MLSContext augments Context with logic for deriving keys from MLS.  Instead
 // of adding individual keys, salts, and key IDs, the caller adds a secret for
 // an epoch, and keys / salts / key IDs are derived as needed.

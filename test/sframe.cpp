@@ -344,3 +344,388 @@ TEST_CASE("MLS Remove Epoch")
   dec = to_bytes(member_b.unprotect(pt_out, enc, metadata).unwrap());
   CHECK(plaintext == dec);
 }
+
+TEST_CASE("RTP Per-SSRC Key Derivation Round-Trip")
+{
+  const auto rounds = 1 << 5;
+  const auto plaintext = from_hex("00010203");
+  const auto base_key = from_hex("000102030405060708090a0b0c0d0e0f");
+  const auto ssrc_a = RTPContext::SSRC(0xDEADBEEF);
+  const auto ssrc_b = RTPContext::SSRC(0xCAFEBABE);
+  const auto kid = KeyID(0x01);
+
+  const std::vector<CipherSuite> suites{
+    CipherSuite::AES_128_CTR_HMAC_SHA256_80,
+    CipherSuite::AES_128_CTR_HMAC_SHA256_64,
+    CipherSuite::AES_128_CTR_HMAC_SHA256_32,
+    CipherSuite::AES_GCM_128_SHA256,
+    CipherSuite::AES_GCM_256_SHA512,
+  };
+
+  auto pt_out = bytes(plaintext.size());
+  auto ct_out = bytes(plaintext.size() + RTPContext::max_overhead);
+
+  for (auto& suite : suites) {
+    // Same base_key + same SSRC => same derived key => round-trip works
+    auto sender = RTPContext(suite);
+    sender.add_key(kid, base_key).unwrap();
+    sender.add_ssrc(ssrc_a, KeyUsage::protect).unwrap();
+
+    auto receiver = RTPContext(suite);
+    receiver.add_key(kid, base_key).unwrap();
+    receiver.add_ssrc(ssrc_a, KeyUsage::unprotect).unwrap();
+
+    for (int i = 0; i < rounds; i++) {
+      auto encrypted =
+        to_bytes(sender.protect(ssrc_a, ct_out, plaintext, {}).unwrap());
+      auto decrypted =
+        to_bytes(receiver.unprotect(ssrc_a, pt_out, encrypted, {}).unwrap());
+      CHECK(decrypted == plaintext);
+    }
+
+    // Different SSRCs with same base_key => different keys => decrypt fails
+    auto wrong_receiver = RTPContext(suite);
+    wrong_receiver.add_key(kid, base_key).unwrap();
+    wrong_receiver.add_ssrc(ssrc_b, KeyUsage::unprotect).unwrap();
+
+    auto encrypted =
+      to_bytes(sender.protect(ssrc_a, ct_out, plaintext, {}).unwrap());
+    CHECK(wrong_receiver.unprotect(ssrc_b, pt_out, encrypted, {}).is_err());
+  }
+}
+
+TEST_CASE("RTP Ratcheting Round-Trip")
+{
+  const auto suite = CipherSuite::AES_GCM_128_SHA256;
+  const auto plaintext = from_hex("04050607");
+  const auto metadata = from_hex("00010203");
+  const auto base_key = from_hex("000102030405060708090a0b0c0d0e0f");
+  const auto ssrc = RTPContext::SSRC(0x12345678);
+  const auto kid_0 = KeyID(0x00);
+  const auto kid_1 = KeyID(0x01);
+  const auto kid_2 = KeyID(0x02);
+
+  auto pt_out = bytes(plaintext.size());
+  auto ct_out = bytes(plaintext.size() + RTPContext::max_overhead);
+
+  auto sender = RTPContext(suite);
+  auto receiver = RTPContext(suite);
+
+  // Initial key
+  sender.add_key(kid_0, base_key).unwrap();
+  sender.add_ssrc(ssrc, KeyUsage::protect).unwrap();
+  receiver.add_key(kid_0, base_key).unwrap();
+  receiver.add_ssrc(ssrc, KeyUsage::unprotect).unwrap();
+
+  auto encrypted =
+    to_bytes(sender.protect(ssrc, ct_out, plaintext, metadata).unwrap());
+  auto decrypted =
+    to_bytes(receiver.unprotect(ssrc, pt_out, encrypted, metadata).unwrap());
+  CHECK(decrypted == plaintext);
+
+  // Ratchet sender only — receiver should auto-ratchet on unprotect
+  sender.ratchet(kid_1).unwrap();
+
+  // New key_id should work — receiver auto-ratchets
+  encrypted =
+    to_bytes(sender.protect(ssrc, ct_out, plaintext, metadata).unwrap());
+  decrypted =
+    to_bytes(receiver.unprotect(ssrc, pt_out, encrypted, metadata).unwrap());
+  CHECK(decrypted == plaintext);
+
+  // Ratchet sender again — receiver catches up automatically
+  sender.ratchet(kid_2).unwrap();
+
+  encrypted =
+    to_bytes(sender.protect(ssrc, ct_out, plaintext, metadata).unwrap());
+  decrypted =
+    to_bytes(receiver.unprotect(ssrc, pt_out, encrypted, metadata).unwrap());
+  CHECK(decrypted == plaintext);
+}
+
+TEST_CASE("RTP Ratcheting Produces Different Keys")
+{
+  const auto suite = CipherSuite::AES_GCM_128_SHA256;
+  const auto plaintext = from_hex("04050607");
+  const auto base_key = from_hex("000102030405060708090a0b0c0d0e0f");
+  const auto ssrc = RTPContext::SSRC(0xAABBCCDD);
+  const auto kid_0 = KeyID(0x00);
+  const auto kid_1 = KeyID(0x01);
+
+  auto ct_out = bytes(plaintext.size() + RTPContext::max_overhead);
+
+  auto sender = RTPContext(suite);
+  sender.add_key(kid_0, base_key).unwrap();
+  sender.add_ssrc(ssrc, KeyUsage::protect).unwrap();
+
+  auto ct_before =
+    to_bytes(sender.protect(ssrc, ct_out, plaintext, {}).unwrap());
+
+  // Ratchet and encrypt again with new key
+  sender.ratchet(kid_1).unwrap();
+  auto ct_after =
+    to_bytes(sender.protect(ssrc, ct_out, plaintext, {}).unwrap());
+
+  // Ciphertexts must differ (different keys)
+  CHECK(ct_before != ct_after);
+}
+
+TEST_CASE("RTP Auto-Ratchet Multi-Step Catch-Up")
+{
+  const auto suite = CipherSuite::AES_GCM_128_SHA256;
+  const auto plaintext = from_hex("aabbccdd");
+  const auto metadata = from_hex("ee");
+  const auto base_key = from_hex("000102030405060708090a0b0c0d0e0f");
+  const auto ssrc = RTPContext::SSRC(0x12345678);
+
+  auto ct_out = bytes(plaintext.size() + RTPContext::max_overhead);
+  auto pt_out = bytes(plaintext.size());
+
+  auto sender = RTPContext(suite);
+  auto receiver = RTPContext(suite);
+  sender.add_key(KeyID(0), base_key).unwrap();
+  sender.add_ssrc(ssrc, KeyUsage::protect).unwrap();
+  receiver.add_key(KeyID(0), base_key).unwrap();
+  receiver.add_ssrc(ssrc, KeyUsage::unprotect).unwrap();
+
+  // Sender ratchets 5 times without receiver knowing
+  for (KeyID kid = 1; kid <= 5; kid++) {
+    sender.ratchet(kid).unwrap();
+  }
+
+  // Receiver should catch up automatically in one unprotect call
+  auto encrypted =
+    to_bytes(sender.protect(ssrc, ct_out, plaintext, metadata).unwrap());
+  auto decrypted =
+    to_bytes(receiver.unprotect(ssrc, pt_out, encrypted, metadata).unwrap());
+  CHECK(decrypted == plaintext);
+}
+
+TEST_CASE("RTP New Key After Ratchet Limit Exceeded")
+{
+  const auto suite = CipherSuite::AES_GCM_128_SHA256;
+  const auto plaintext = from_hex("aabbccdd");
+  const auto metadata = from_hex("ee");
+  const auto base_key = from_hex("000102030405060708090a0b0c0d0e0f");
+  const auto new_base_key = from_hex("f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff");
+  const auto ssrc = RTPContext::SSRC(0xAABBCCDD);
+
+  auto ct_out = bytes(plaintext.size() + RTPContext::max_overhead);
+  auto pt_out = bytes(plaintext.size());
+
+  auto sender = RTPContext(suite);
+  auto receiver = RTPContext(suite);
+  sender.add_key(KeyID(0), base_key).unwrap();
+  sender.add_ssrc(ssrc, KeyUsage::protect).unwrap();
+  receiver.add_key(KeyID(0), base_key).unwrap();
+  receiver.add_ssrc(ssrc, KeyUsage::unprotect).unwrap();
+
+  // Sender ratchets 300 times (exceeds the 256 auto-ratchet limit)
+  for (KeyID kid = 1; kid <= 300; kid++) {
+    sender.ratchet(kid).unwrap();
+  }
+
+  // Receiver auto-ratchet should fail (gap=300 > 256)
+  auto encrypted =
+    to_bytes(sender.protect(ssrc, ct_out, plaintext, metadata).unwrap());
+  CHECK(receiver.unprotect(ssrc, pt_out, encrypted, metadata).is_err());
+
+  // Install a fresh key on both sides — should recover
+  sender.add_key(KeyID(0), new_base_key).unwrap();
+  receiver.add_key(KeyID(0), new_base_key).unwrap();
+
+  encrypted =
+    to_bytes(sender.protect(ssrc, ct_out, plaintext, metadata).unwrap());
+  auto decrypted =
+    to_bytes(receiver.unprotect(ssrc, pt_out, encrypted, metadata).unwrap());
+  CHECK(decrypted == plaintext);
+}
+
+TEST_CASE("RTP Remove SSRC")
+{
+  const auto suite = CipherSuite::AES_GCM_128_SHA256;
+  const auto plaintext = from_hex("00010203");
+  const auto base_key = from_hex("000102030405060708090a0b0c0d0e0f");
+  const auto ssrc = RTPContext::SSRC(0x11223344);
+  const auto kid = KeyID(0x42);
+
+  auto ct_out = bytes(plaintext.size() + RTPContext::max_overhead);
+
+  auto ctx = RTPContext(suite);
+  ctx.add_key(kid, base_key).unwrap();
+  ctx.add_ssrc(ssrc, KeyUsage::protect).unwrap();
+
+  // Protect should work
+  CHECK(ctx.protect(ssrc, ct_out, plaintext, {}).is_ok());
+
+  // Remove and verify protect fails
+  ctx.remove_ssrc(ssrc);
+  CHECK(ctx.protect(ssrc, ct_out, plaintext, {}).is_err());
+}
+
+TEST_CASE("RTP Multiple SSRCs On Same Context")
+{
+  const auto suite = CipherSuite::AES_GCM_128_SHA256;
+  const auto plaintext_a = from_hex("aabbccdd");
+  const auto plaintext_v = from_hex("11223344");
+  const auto base_key = from_hex("000102030405060708090a0b0c0d0e0f");
+  const auto ssrc_audio = RTPContext::SSRC(0x00000001);
+  const auto ssrc_video = RTPContext::SSRC(0x00000002);
+  const auto kid = KeyID(0x00);
+
+  auto ct_out = bytes(128);
+  auto pt_out = bytes(128);
+
+  auto sender = RTPContext(suite);
+  auto receiver = RTPContext(suite);
+
+  // Same KID for all SSRCs (spec-compliant)
+  sender.add_key(kid, base_key).unwrap();
+  sender.add_ssrc(ssrc_audio, KeyUsage::protect).unwrap();
+  sender.add_ssrc(ssrc_video, KeyUsage::protect).unwrap();
+
+  receiver.add_key(kid, base_key).unwrap();
+  receiver.add_ssrc(ssrc_audio, KeyUsage::unprotect).unwrap();
+  receiver.add_ssrc(ssrc_video, KeyUsage::unprotect).unwrap();
+
+  // Audio round-trip
+  auto ct_a =
+    to_bytes(sender.protect(ssrc_audio, ct_out, plaintext_a, {}).unwrap());
+  auto pt_a =
+    to_bytes(receiver.unprotect(ssrc_audio, pt_out, ct_a, {}).unwrap());
+  CHECK(pt_a == plaintext_a);
+
+  // Video round-trip
+  auto ct_v =
+    to_bytes(sender.protect(ssrc_video, ct_out, plaintext_v, {}).unwrap());
+  auto pt_v =
+    to_bytes(receiver.unprotect(ssrc_video, pt_out, ct_v, {}).unwrap());
+  CHECK(pt_v == plaintext_v);
+
+  // Cross-SSRC: audio ciphertext cannot be decrypted with video SSRC
+  // (different derived keys due to different SSRCs)
+  auto ct_a2 =
+    to_bytes(sender.protect(ssrc_audio, ct_out, plaintext_a, {}).unwrap());
+  CHECK(receiver.unprotect(ssrc_video, pt_out, ct_a2, {}).is_err());
+}
+
+TEST_CASE("RTP Ratchet Advances All SSRCs Together")
+{
+  const auto suite = CipherSuite::AES_GCM_128_SHA256;
+  const auto plaintext = from_hex("deadbeef");
+  const auto base_key = from_hex("000102030405060708090a0b0c0d0e0f");
+  const auto ssrc_a = RTPContext::SSRC(0xAAAAAAAA);
+  const auto ssrc_b = RTPContext::SSRC(0xBBBBBBBB);
+  const auto kid_0 = KeyID(0x00);
+
+  auto ct_out = bytes(plaintext.size() + RTPContext::max_overhead);
+  auto pt_out = bytes(plaintext.size());
+
+  auto sender = RTPContext(suite);
+  auto receiver = RTPContext(suite);
+
+  sender.add_key(kid_0, base_key).unwrap();
+  sender.add_ssrc(ssrc_a, KeyUsage::protect).unwrap();
+  sender.add_ssrc(ssrc_b, KeyUsage::protect).unwrap();
+  receiver.add_key(kid_0, base_key).unwrap();
+  receiver.add_ssrc(ssrc_a, KeyUsage::unprotect).unwrap();
+  receiver.add_ssrc(ssrc_b, KeyUsage::unprotect).unwrap();
+
+  // Ratchet all SSRCs twice (KIDs 0x01, 0x02)
+  sender.ratchet(KeyID(0x01)).unwrap();
+  sender.ratchet(KeyID(0x02)).unwrap();
+
+  // Both SSRCs should work with auto-ratchet on receiver
+  auto ct_a = to_bytes(sender.protect(ssrc_a, ct_out, plaintext, {}).unwrap());
+  auto pt_a = to_bytes(receiver.unprotect(ssrc_a, pt_out, ct_a, {}).unwrap());
+  CHECK(pt_a == plaintext);
+
+  auto ct_b = to_bytes(sender.protect(ssrc_b, ct_out, plaintext, {}).unwrap());
+  auto pt_b = to_bytes(receiver.unprotect(ssrc_b, pt_out, ct_b, {}).unwrap());
+  CHECK(pt_b == plaintext);
+
+  // Cross-SSRC decrypt should still fail (different derived keys)
+  auto ct_a2 = to_bytes(sender.protect(ssrc_a, ct_out, plaintext, {}).unwrap());
+  CHECK(receiver.unprotect(ssrc_b, pt_out, ct_a2, {}).is_err());
+}
+
+TEST_CASE("RTP Old KID Fails After Auto-Ratchet")
+{
+  const auto suite = CipherSuite::AES_GCM_128_SHA256;
+  const auto plaintext = from_hex("cafebabe");
+  const auto metadata = from_hex("ff");
+  const auto base_key = from_hex("000102030405060708090a0b0c0d0e0f");
+  const auto ssrc = RTPContext::SSRC(0x12345678);
+
+  auto ct_out = bytes(plaintext.size() + RTPContext::max_overhead);
+  auto pt_out = bytes(plaintext.size());
+
+  auto sender = RTPContext(suite);
+  auto receiver = RTPContext(suite);
+  sender.add_key(KeyID(0), base_key).unwrap();
+  sender.add_ssrc(ssrc, KeyUsage::protect).unwrap();
+  receiver.add_key(KeyID(0), base_key).unwrap();
+  receiver.add_ssrc(ssrc, KeyUsage::unprotect).unwrap();
+
+  // Encrypt with KID=0
+  auto ct_kid0 =
+    to_bytes(sender.protect(ssrc, ct_out, plaintext, metadata).unwrap());
+
+  // Sender ratchets to KID=2, receiver auto-ratchets
+  sender.ratchet(KeyID(1)).unwrap();
+  sender.ratchet(KeyID(2)).unwrap();
+
+  auto ct_kid2 =
+    to_bytes(sender.protect(ssrc, ct_out, plaintext, metadata).unwrap());
+  auto decrypted =
+    to_bytes(receiver.unprotect(ssrc, pt_out, ct_kid2, metadata).unwrap());
+  CHECK(decrypted == plaintext);
+
+  // Now try to decrypt the old KID=0 packet — should fail
+  // (forward secrecy: old key was deleted during ratchet)
+  CHECK(receiver.unprotect(ssrc, pt_out, ct_kid0, metadata).is_err());
+}
+
+TEST_CASE("RTP Backward KID Rejected")
+{
+  const auto suite = CipherSuite::AES_GCM_128_SHA256;
+  const auto plaintext = from_hex("01020304");
+  const auto base_key = from_hex("000102030405060708090a0b0c0d0e0f");
+  const auto ssrc = RTPContext::SSRC(0xDEADFACE);
+
+  auto ct_out = bytes(plaintext.size() + RTPContext::max_overhead);
+  auto pt_out = bytes(plaintext.size());
+
+  auto sender = RTPContext(suite);
+  auto receiver = RTPContext(suite);
+  sender.add_key(KeyID(0), base_key).unwrap();
+  sender.add_ssrc(ssrc, KeyUsage::protect).unwrap();
+  receiver.add_key(KeyID(0), base_key).unwrap();
+  receiver.add_ssrc(ssrc, KeyUsage::unprotect).unwrap();
+
+  // Both sides ratchet to KID=5
+  for (KeyID kid = 1; kid <= 5; kid++) {
+    sender.ratchet(kid).unwrap();
+    receiver.ratchet(kid).unwrap();
+  }
+
+  // Encrypt with current KID=5
+  auto ct_kid5 = to_bytes(sender.protect(ssrc, ct_out, plaintext, {}).unwrap());
+  auto decrypted =
+    to_bytes(receiver.unprotect(ssrc, pt_out, ct_kid5, {}).unwrap());
+  CHECK(decrypted == plaintext);
+
+  // Craft a scenario: a second sender at KID=3 (behind receiver's KID=5)
+  // Receiver should reject it — backward KID
+  auto old_sender = RTPContext(suite);
+  old_sender.add_key(KeyID(0), base_key).unwrap();
+  old_sender.add_ssrc(ssrc, KeyUsage::protect).unwrap();
+  for (KeyID kid = 1; kid <= 3; kid++) {
+    old_sender.ratchet(kid).unwrap();
+  }
+  auto ct_kid3 =
+    to_bytes(old_sender.protect(ssrc, ct_out, plaintext, {}).unwrap());
+
+  // Receiver at KID=5 should reject KID=3
+  CHECK(receiver.unprotect(ssrc, pt_out, ct_kid3, {}).is_err());
+}

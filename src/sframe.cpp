@@ -92,6 +92,7 @@ Context::add_key(KeyID key_id, KeyUsage usage, input_bytes base_key)
 {
   SFRAME_VALUE_OR_RETURN(
     record, KeyRecord::from_base_key(suite, key_id, usage, base_key));
+  keys.erase(key_id);
   keys.emplace(key_id, record);
   return Result<void>::ok();
 }
@@ -214,6 +215,243 @@ Context::unprotect_inner(const Header& header,
   SFRAME_VALUE_OR_RETURN(aad, form_aad(header, metadata));
   const auto nonce = form_nonce(header.counter, key_and_salt.salt);
   return open(suite, key_and_salt.key, nonce, plaintext, aad, ciphertext);
+}
+
+///
+/// RTP per-SSRC key derivation and ratcheting
+///
+
+static const auto rtp_stream_label = from_ascii("SFrame 1.0 RTP Stream", 21);
+static const auto ratchet_label = from_ascii("SFrame 1.0 Ratchet", 18);
+static const auto empty_info = owned_bytes<1>();
+
+static Result<owned_bytes<64>>
+derive_ssrc_key(CipherSuite suite, uint32_t ssrc, input_bytes base_key)
+{
+  SFRAME_VALUE_OR_RETURN(hash_size, cipher_digest_size(suite));
+
+  // Encode SSRC as 4-byte big-endian salt
+  auto ssrc_salt = owned_bytes<4>();
+  ssrc_salt.resize(4);
+  ssrc_salt[0] = uint8_t(ssrc >> 24);
+  ssrc_salt[1] = uint8_t(ssrc >> 16);
+  ssrc_salt[2] = uint8_t(ssrc >> 8);
+  ssrc_salt[3] = uint8_t(ssrc);
+
+  SFRAME_VALUE_OR_RETURN(prk, hkdf_extract(suite, ssrc_salt, base_key));
+  return hkdf_expand(suite, prk, rtp_stream_label, hash_size);
+}
+
+static Result<owned_bytes<64>>
+ratchet_key(CipherSuite suite, input_bytes current_key)
+{
+  SFRAME_VALUE_OR_RETURN(hash_size, cipher_digest_size(suite));
+  SFRAME_VALUE_OR_RETURN(prk, hkdf_extract(suite, ratchet_label, current_key));
+  return hkdf_expand(suite, prk, empty_info, hash_size);
+}
+
+///
+/// RTPContext
+///
+
+RTPContext::RTPContext(CipherSuite suite_in)
+  : suite(suite_in)
+  , current_key_id(0)
+  , ratchet_count(0)
+{
+}
+
+Result<RTPContext::SSRCRecord>
+RTPContext::derive_ssrc_record(SSRC ssrc, KeyUsage usage) const
+{
+  // Derive per-SSRC key from the base key
+  SFRAME_VALUE_OR_RETURN(ssrc_key, derive_ssrc_key(suite, ssrc, base_key));
+
+  // Apply ratchet steps to match the current ratchet count
+  auto current = ssrc_key;
+  for (uint64_t i = 0; i < ratchet_count; i++) {
+    SFRAME_VALUE_OR_RETURN(next, ratchet_key(suite, current));
+    current = next;
+  }
+
+  // Create a KeyRecord from the derived ssrc key
+  SFRAME_VALUE_OR_RETURN(
+    key_record,
+    KeyRecord::from_base_key(suite, current_key_id, usage, current));
+
+  return SSRCRecord{ current, key_record, usage };
+}
+
+Result<void>
+RTPContext::add_key(KeyID key_id, input_bytes new_base_key)
+{
+  base_key = owned_bytes<max_base_key_size>(new_base_key);
+  current_key_id = key_id;
+  ratchet_count = 0;
+
+  // Re-derive keys for all existing SSRCs
+  for (auto& maybe_pair : ssrc_records) {
+#ifdef NO_ALLOC
+    if (!maybe_pair) {
+      continue;
+    }
+    auto& [ssrc, record] = maybe_pair.value();
+#else
+    auto& [ssrc, record] = maybe_pair;
+#endif
+
+    SFRAME_VALUE_OR_RETURN(new_record, derive_ssrc_record(ssrc, record.usage));
+    record = std::move(new_record);
+  }
+
+  return Result<void>::ok();
+}
+
+Result<void>
+RTPContext::add_ssrc(SSRC ssrc, KeyUsage usage)
+{
+  if (base_key.empty()) {
+    return SFrameError(SFrameErrorType::invalid_parameter_error,
+                       "No base key set");
+  }
+
+  SFRAME_VALUE_OR_RETURN(record, derive_ssrc_record(ssrc, usage));
+
+  ssrc_records.erase(ssrc);
+  ssrc_records.emplace(ssrc, std::move(record));
+  return Result<void>::ok();
+}
+
+Result<void>
+RTPContext::ratchet(KeyID new_key_id)
+{
+  if (base_key.empty()) {
+    return SFrameError(SFrameErrorType::invalid_parameter_error,
+                       "No base key set");
+  }
+
+  ratchet_count += 1;
+  current_key_id = new_key_id;
+
+  // Ratchet every SSRC
+  for (auto& maybe_pair : ssrc_records) {
+#ifdef NO_ALLOC
+    if (!maybe_pair) {
+      continue;
+    }
+    auto& [ssrc, record] = maybe_pair.value();
+#else
+    auto& [ssrc, record] = maybe_pair;
+#endif
+
+    SFRAME_VALUE_OR_RETURN(new_ssrc_key,
+                           ratchet_key(suite, record.current_ssrc_key));
+    SFRAME_VALUE_OR_RETURN(
+      new_key_record,
+      KeyRecord::from_base_key(suite, new_key_id, record.usage, new_ssrc_key));
+
+    record.current_ssrc_key = new_ssrc_key;
+    record.key_record = new_key_record;
+  }
+
+  return Result<void>::ok();
+}
+
+Result<output_bytes>
+RTPContext::protect(SSRC ssrc,
+                    output_bytes ciphertext,
+                    input_bytes plaintext,
+                    input_bytes metadata)
+{
+  if (!ssrc_records.contains(ssrc)) {
+    return SFrameError(SFrameErrorType::invalid_parameter_error,
+                       "Unknown SSRC");
+  }
+
+  auto& record = ssrc_records.at(ssrc);
+  const auto counter = record.key_record.counter;
+  record.key_record.counter += 1;
+
+  const auto header = Header{ current_key_id, counter };
+  const auto header_data = header.encoded();
+  if (ciphertext.size() < header_data.size()) {
+    return SFrameError(SFrameErrorType::buffer_too_small_error,
+                       "Ciphertext too small for SFrame header");
+  }
+
+  std::copy(header_data.begin(), header_data.end(), ciphertext.begin());
+  auto inner_ciphertext = ciphertext.subspan(header_data.size());
+
+  SFRAME_VALUE_OR_RETURN(overhead, cipher_overhead(suite));
+  if (inner_ciphertext.size() < plaintext.size() + overhead) {
+    return SFrameError(SFrameErrorType::buffer_too_small_error,
+                       "Ciphertext too small for cipher overhead");
+  }
+
+  SFRAME_VALUE_OR_RETURN(aad, form_aad(header, metadata));
+  const auto nonce = form_nonce(counter, record.key_record.salt);
+  SFRAME_VALUE_OR_RETURN(
+    sealed,
+    seal(
+      suite, record.key_record.key, nonce, inner_ciphertext, aad, plaintext));
+  return ciphertext.first(header_data.size() + sealed.size());
+}
+
+Result<output_bytes>
+RTPContext::unprotect(SSRC ssrc,
+                      output_bytes plaintext,
+                      input_bytes ciphertext,
+                      input_bytes metadata)
+{
+  SFRAME_VALUE_OR_RETURN(header, Header::parse(ciphertext));
+
+  if (!ssrc_records.contains(ssrc)) {
+    return SFrameError(SFrameErrorType::invalid_parameter_error,
+                       "Unknown SSRC");
+  }
+
+  // Auto-ratchet if needed
+  if (header.key_id != current_key_id) {
+    if (header.key_id <= current_key_id) {
+      return SFrameError(SFrameErrorType::invalid_parameter_error,
+                         "Unknown key ID");
+    }
+
+    static constexpr uint64_t max_ratchet_steps = 256;
+    const auto steps = header.key_id - current_key_id;
+    if (steps > max_ratchet_steps) {
+      return SFrameError(SFrameErrorType::invalid_parameter_error,
+                         "Ratchet step count exceeds limit");
+    }
+
+    for (uint64_t i = 0; i < steps; i++) {
+      SFRAME_VOID_OR_RETURN(ratchet(current_key_id + 1));
+    }
+  }
+
+  auto& record = ssrc_records.at(ssrc);
+  const auto inner_ciphertext = ciphertext.subspan(header.size());
+
+  SFRAME_VALUE_OR_RETURN(overhead, cipher_overhead(suite));
+  if (inner_ciphertext.size() < overhead) {
+    return SFrameError(SFrameErrorType::buffer_too_small_error,
+                       "Ciphertext too small for cipher overhead");
+  }
+  if (plaintext.size() < inner_ciphertext.size() - overhead) {
+    return SFrameError(SFrameErrorType::buffer_too_small_error,
+                       "Plaintext too small for decrypted value");
+  }
+
+  SFRAME_VALUE_OR_RETURN(aad, form_aad(header, metadata));
+  const auto nonce = form_nonce(header.counter, record.key_record.salt);
+  return open(
+    suite, record.key_record.key, nonce, plaintext, aad, inner_ciphertext);
+}
+
+void
+RTPContext::remove_ssrc(SSRC ssrc)
+{
+  ssrc_records.erase(ssrc);
 }
 
 ///
