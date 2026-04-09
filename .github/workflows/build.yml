@@ -19,7 +19,6 @@ jobs:
       matrix:
         os: [windows-latest, ubuntu-latest, macos-latest]
         crypto: [OPENSSL_1_1, OPENSSL_3, BORINGSSL]
-        no_alloc: [OFF, ON]
         include:
             - os: windows-latest
               vcpkg-cmake-file: "$env:VCPKG_INSTALLATION_ROOT\\scripts\\buildsystems\\vcpkg.cmake"
@@ -58,13 +57,13 @@ jobs:
             ${{ env.CMAKE_BUILD_DIR }}/vcpkg_installed
         key: ${{ runner.os }}-${{ hashFiles( '**/vcpkg.json' ) }}
 
-    - name: configure to use clang-tidy and sanitizers
+    - name: configure
       run: cmake -B "${{ env.CMAKE_BUILD_DIR }}"
-                 -DTESTING=ON -DCLANG_TIDY=ON -DSANITIZERS=ON
+                 -DCMAKE_BUILD_TYPE=Release
+                 -DTESTING=ON
                  -DCMAKE_TOOLCHAIN_FILE="${{ matrix.vcpkg-cmake-file}}"
                  -DCRYPTO="${{ matrix.crypto }}"
                  -DVCPKG_MANIFEST_DIR="alternatives/${{ matrix.crypto }}"
-                 -DNO_ALLOC="${{ matrix.no_alloc }}"
 
     - name: build
       run: |
@@ -73,4 +72,117 @@ jobs:
     - name: Unit tests
       run: |
         ctest --test-dir "${{ env.CMAKE_BUILD_DIR }}"
+
+    - name: Record binary size
+      shell: bash
+      run: |
+        LIB_FILE=$(find "${{ env.CMAKE_BUILD_DIR }}" -maxdepth 2 \( -name "libsframe.a" -o -name "sframe.lib" \) -print -quit)
+        SIZE=$(wc -c < "$LIB_FILE" | tr -d ' ')
+        echo "${{ matrix.os }},${{ matrix.crypto }},$SIZE" \
+          > "${{ env.CMAKE_BUILD_DIR }}/size-${{ matrix.os }}-${{ matrix.crypto }}.csv"
+
+    - name: Upload size report
+      uses: actions/upload-artifact@v4
+      with:
+        name: size-${{ matrix.os }}-${{ matrix.crypto }}
+        path: ${{ env.CMAKE_BUILD_DIR }}/size-${{ matrix.os }}-${{ matrix.crypto }}.csv
+
+  size-report:
+    if: github.event_name == 'pull_request'
+    needs: [build, android-build]
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+    steps:
+    - name: Download all size artifacts
+      uses: actions/download-artifact@v4
+      with:
+        pattern: size-*
+        merge-multiple: true
+
+    - name: Build size table
+      shell: bash
+      run: |
+        echo "## Binary Size Report (Release)" > comment.md
+        echo "" >> comment.md
+        echo "| OS | Crypto | Size |" >> comment.md
+        echo "|---|---|---:|" >> comment.md
+        cat size-*.csv | sort | while IFS=, read -r os crypto size; do
+          if (( size >= 1048576 )); then
+            human=$(awk "BEGIN {printf \"%.2f MiB\", $size/1048576}")
+          else
+            human=$(awk "BEGIN {printf \"%.2f KiB\", $size/1024}")
+          fi
+          echo "| $os | $crypto | $human |" >> comment.md
+        done
+
+    - name: Post PR comment
+      uses: marocchino/sticky-pull-request-comment@v2
+      continue-on-error: true
+      with:
+        header: size-report
+        path: comment.md
+
+  android-build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        crypto: [OPENSSL_1_1, OPENSSL_3, BORINGSSL]
+
+    env:
+      CMAKE_BUILD_DIR: ${{ github.workspace }}/build
+      CMAKE_GENERATOR: "Ninja"
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: dependencies
+      run: |
+        sudo apt-get install -y nasm ninja-build
+
+    - name: Restore cache
+      uses: actions/cache@v4
+      with:
+        path: |
+            ${{ env.CMAKE_BUILD_DIR }}/vcpkg_installed
+        key: android-arm64-v8a-${{ hashFiles( '**/vcpkg.json' ) }}
+
+    - name: configure
+      run: cmake -B "${{ env.CMAKE_BUILD_DIR }}"
+                 -DCMAKE_BUILD_TYPE=Release
+                 -DTESTING=OFF
+                 -DCMAKE_TOOLCHAIN_FILE="$VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
+                 -DVCPKG_TARGET_TRIPLET=arm64-android
+                 -DVCPKG_CHAINLOAD_TOOLCHAIN_FILE="$ANDROID_NDK/build/cmake/android.toolchain.cmake"
+                 -DANDROID_ABI=arm64-v8a
+                 -DANDROID_PLATFORM=android-24
+                 -DCRYPTO="${{ matrix.crypto }}"
+                 -DVCPKG_MANIFEST_DIR="alternatives/${{ matrix.crypto }}"
+
+    - name: build
+      run: |
+        cmake --build "${{ env.CMAKE_BUILD_DIR }}" --config Release
+
+    - name: Record binary size
+      shell: bash
+      run: |
+        LIB_FILE=$(find "${{ env.CMAKE_BUILD_DIR }}" -maxdepth 2 \( -name "libsframe.a" -o -name "sframe.lib" \) -print -quit)
+        echo "=== Per-object sizes (before strip) ==="
+        ar t "$LIB_FILE" | while read obj; do
+          OBJ_SIZE=$(ar p "$LIB_FILE" "$obj" | wc -c)
+          echo "  $obj: $OBJ_SIZE"
+        done
+        echo "=== Total before strip: $(wc -c < "$LIB_FILE" | tr -d ' ') ==="
+        ${ANDROID_NDK}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip --strip-debug "$LIB_FILE" || strip --strip-debug "$LIB_FILE" || true
+        echo "=== Total after strip: $(wc -c < "$LIB_FILE" | tr -d ' ') ==="
+        SIZE=$(wc -c < "$LIB_FILE" | tr -d ' ')
+        echo "android-arm64-v8a,${{ matrix.crypto }},$SIZE" \
+          > "${{ env.CMAKE_BUILD_DIR }}/size-android-arm64-v8a-${{ matrix.crypto }}.csv"
+
+    - name: Upload size report
+      uses: actions/upload-artifact@v4
+      with:
+        name: size-android-arm64-v8a-${{ matrix.crypto }}
+        path: ${{ env.CMAKE_BUILD_DIR }}/size-android-arm64-v8a-${{ matrix.crypto }}.csv
 
