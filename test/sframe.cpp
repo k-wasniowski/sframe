@@ -53,6 +53,7 @@ TEST_CASE("SFrame Round-Trip")
   }
 }
 
+#ifdef SFRAME_MLS
 // The MLS-based key derivation isn't covered by the RFC test vectors.  So we
 // only have round-trip tests, not known-answer tests.
 TEST_CASE("MLS Round-Trip")
@@ -231,6 +232,7 @@ TEST_CASE("MLS Failure after Purge")
   const auto dec_ab_2 = member_b.unprotect(pt_out, enc_ab_2, metadata).unwrap();
   CHECK(plaintext == to_bytes(dec_ab_2));
 }
+#endif // SFRAME_MLS
 
 TEST_CASE("SFrame Context Remove Key")
 {
@@ -286,6 +288,7 @@ TEST_CASE("SFrame Context Remove Key - Nonexistent Key")
   CHECK_NOTHROW(ctx.remove_key(KeyID(0x99)));
 }
 
+#ifdef SFRAME_MLS
 TEST_CASE("MLS Remove Epoch")
 {
   const auto suite = CipherSuite::AES_GCM_128_SHA256;
@@ -344,3 +347,4 @@ TEST_CASE("MLS Remove Epoch")
   dec = to_bytes(member_b.unprotect(pt_out, enc, metadata).unwrap());
   CHECK(plaintext == dec);
 }
+#endif // SFRAME_MLS

@@ -216,6 +216,7 @@ Context::unprotect_inner(const Header& header,
   return open(suite, key_and_salt.key, nonce, plaintext, aad, ciphertext);
 }
 
+#ifdef SFRAME_MLS
 ///
 /// MLSContext
 ///
@@ -416,5 +417,6 @@ MLSContext::ensure_key(KeyID key_id, KeyUsage usage)
   SFRAME_VALUE_OR_RETURN(base, epoch->base_key(suite, sender_id));
   return Context::add_key(key_id, usage, base);
 }
+#endif // SFRAME_MLS
 
 } // namespace SFRAME_NAMESPACE
