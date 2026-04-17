@@ -1,0 +1,461 @@
+name: Binary Size Report
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+        crypto: [BORINGSSL]
+        mls: [ON, OFF]
+        include:
+          - os: windows-latest
+            vcpkg-cmake-file: "$env:VCPKG_INSTALLATION_ROOT\\scripts\\buildsystems\\vcpkg.cmake"
+          - os: ubuntu-latest
+            vcpkg-cmake-file: "$VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
+          - os: macos-latest
+            vcpkg-cmake-file: "$VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
+
+    env:
+      CMAKE_BUILD_DIR: ${{ github.workspace }}/build
+      CMAKE_GENERATOR: "Ninja"
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Dependencies (ubuntu)
+      if: matrix.os == 'ubuntu-latest'
+      run: sudo apt-get install -y nasm
+
+    - name: Dependencies (macos)
+      if: matrix.os == 'macos-latest'
+      run: brew install ninja nasm
+
+    - name: Restore cache
+      uses: actions/cache@v4
+      with:
+        path: ${{ env.CMAKE_BUILD_DIR }}/vcpkg_installed
+        key: size-${{ runner.os }}-${{ matrix.crypto }}-${{ hashFiles('**/vcpkg.json') }}
+
+    - name: Configure
+      run: cmake -B "${{ env.CMAKE_BUILD_DIR }}"
+                 -DCMAKE_BUILD_TYPE=Release
+                 -DTESTING=OFF -DCLANG_TIDY=OFF -DSANITIZERS=OFF
+                 -DSFRAME_MLS=${{ matrix.mls }}
+                 -DCMAKE_TOOLCHAIN_FILE="${{ matrix.vcpkg-cmake-file }}"
+                 -DCRYPTO="${{ matrix.crypto }}"
+                 -DVCPKG_MANIFEST_DIR="alternatives/${{ matrix.crypto }}"
+
+    - name: Build
+      run: cmake --build "${{ env.CMAKE_BUILD_DIR }}" --config Release
+
+    - name: Find library
+      id: find-lib
+      shell: bash
+      run: |
+        LIB_FILE=$(find "${{ env.CMAKE_BUILD_DIR }}" -maxdepth 2 \( -name "libsframe.a" -o -name "sframe.lib" \) -print -quit)
+        if [ -z "$LIB_FILE" ]; then
+          echo "::error::Library not found"
+          exit 1
+        fi
+        echo "lib_path=$LIB_FILE" >> "$GITHUB_OUTPUT"
+        echo "Found library: $LIB_FILE"
+
+    - name: Measure size (unix)
+      if: runner.os != 'Windows'
+      id: size-unix
+      shell: bash
+      run: |
+        LIB="${{ steps.find-lib.outputs.lib_path }}"
+        RAW_SIZE=$(wc -c < "$LIB" | tr -d ' ')
+        echo "raw_size=$RAW_SIZE" >> "$GITHUB_OUTPUT"
+
+        # macOS strip uses different flags
+        if [[ "$OSTYPE" == darwin* ]]; then
+          STRIP_DBG="strip -S"
+          STRIP_ALL="strip -x"
+        else
+          STRIP_DBG="strip --strip-debug"
+          STRIP_ALL="strip --strip-all"
+        fi
+
+        # Strip debug symbols only (keep global symbols for linking)
+        cp "$LIB" "$LIB.stripped"
+        $STRIP_DBG "$LIB.stripped"
+        STRIPPED_SIZE=$(wc -c < "$LIB.stripped" | tr -d ' ')
+        echo "stripped_size=$STRIPPED_SIZE" >> "$GITHUB_OUTPUT"
+
+        # Strip everything (simulates final linked binary contribution)
+        cp "$LIB" "$LIB.full-stripped"
+        $STRIP_ALL "$LIB.full-stripped"
+        FULL_STRIPPED_SIZE=$(wc -c < "$LIB.full-stripped" | tr -d ' ')
+        echo "full_stripped_size=$FULL_STRIPPED_SIZE" >> "$GITHUB_OUTPUT"
+
+        # .text section size (actual code)
+        TEXT_SIZE=$(size "$LIB" | tail -1 | awk '{print $1}')
+        echo "text_size=$TEXT_SIZE" >> "$GITHUB_OUTPUT"
+
+    - name: Measure size (windows)
+      if: runner.os == 'Windows'
+      id: size-windows
+      shell: bash
+      run: |
+        LIB="${{ steps.find-lib.outputs.lib_path }}"
+        RAW_SIZE=$(wc -c < "$LIB" | tr -d ' ')
+        echo "raw_size=$RAW_SIZE" >> "$GITHUB_OUTPUT"
+        echo "stripped_size=$RAW_SIZE" >> "$GITHUB_OUTPUT"
+        echo "full_stripped_size=$RAW_SIZE" >> "$GITHUB_OUTPUT"
+        echo "text_size=N/A" >> "$GITHUB_OUTPUT"
+
+    - name: Write CSV row
+      shell: bash
+      run: |
+        if [ "${{ runner.os }}" = "Windows" ]; then
+          RAW="${{ steps.size-windows.outputs.raw_size }}"
+          STRIPPED="${{ steps.size-windows.outputs.stripped_size }}"
+          FULL_STRIPPED="${{ steps.size-windows.outputs.full_stripped_size }}"
+          TEXT="${{ steps.size-windows.outputs.text_size }}"
+        else
+          RAW="${{ steps.size-unix.outputs.raw_size }}"
+          STRIPPED="${{ steps.size-unix.outputs.stripped_size }}"
+          FULL_STRIPPED="${{ steps.size-unix.outputs.full_stripped_size }}"
+          TEXT="${{ steps.size-unix.outputs.text_size }}"
+        fi
+
+        mkdir -p "$RUNNER_TEMP/size-report"
+        echo "${{ matrix.os }},${{ matrix.crypto }},${{ matrix.mls }},$RAW,$STRIPPED,$FULL_STRIPPED,$TEXT" \
+          > "$RUNNER_TEMP/size-report/${{ matrix.os }}-${{ matrix.crypto }}-mls${{ matrix.mls }}.csv"
+
+    - name: Upload size data
+      uses: actions/upload-artifact@v4
+      with:
+        name: size-${{ matrix.os }}-${{ matrix.crypto }}-mls${{ matrix.mls }}
+        path: ${{ runner.temp }}/size-report/${{ matrix.os }}-${{ matrix.crypto }}-mls${{ matrix.mls }}.csv
+
+  android-build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        crypto: [BORINGSSL]
+        mls: [ON, OFF]
+
+    env:
+      CMAKE_BUILD_DIR: ${{ github.workspace }}/build
+      CMAKE_GENERATOR: "Ninja"
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Dependencies
+      run: sudo apt-get install -y nasm
+
+    - name: Restore cache
+      uses: actions/cache@v4
+      with:
+        path: ${{ env.CMAKE_BUILD_DIR }}/vcpkg_installed
+        key: size-android-arm64-${{ matrix.crypto }}-mls${{ matrix.mls }}-${{ hashFiles('**/vcpkg.json') }}
+
+    - name: Configure
+      run: |
+        cmake -B "${{ env.CMAKE_BUILD_DIR }}" \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DTESTING=OFF -DCLANG_TIDY=OFF -DSANITIZERS=OFF \
+          -DSFRAME_MLS=${{ matrix.mls }} \
+          -DCMAKE_TOOLCHAIN_FILE="$VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" \
+          -DVCPKG_CHAINLOAD_TOOLCHAIN_FILE="$ANDROID_NDK_ROOT/build/cmake/android.toolchain.cmake" \
+          -DVCPKG_TARGET_TRIPLET=arm64-android \
+          -DANDROID_ABI=arm64-v8a \
+          -DANDROID_PLATFORM=android-24 \
+          -DCRYPTO="${{ matrix.crypto }}" \
+          -DVCPKG_MANIFEST_DIR="alternatives/${{ matrix.crypto }}"
+
+    - name: Build
+      run: cmake --build "${{ env.CMAKE_BUILD_DIR }}" --config Release
+
+    - name: Measure size
+      id: size
+      shell: bash
+      run: |
+        LIB_FILE=$(find "${{ env.CMAKE_BUILD_DIR }}" -maxdepth 2 -name "libsframe.a" -print -quit)
+        if [ -z "$LIB_FILE" ]; then
+          echo "::error::Library not found"
+          exit 1
+        fi
+
+        RAW_SIZE=$(wc -c < "$LIB_FILE" | tr -d ' ')
+
+        # Use NDK's llvm-strip
+        STRIP_TOOL=$(find "$ANDROID_NDK_ROOT" -name "llvm-strip" | head -1)
+
+        cp "$LIB_FILE" "$LIB_FILE.stripped"
+        "$STRIP_TOOL" --strip-debug "$LIB_FILE.stripped"
+        STRIPPED_SIZE=$(wc -c < "$LIB_FILE.stripped" | tr -d ' ')
+
+        cp "$LIB_FILE" "$LIB_FILE.full-stripped"
+        "$STRIP_TOOL" --strip-all "$LIB_FILE.full-stripped" 2>/dev/null || true
+        FULL_STRIPPED_SIZE=$(wc -c < "$LIB_FILE.full-stripped" | tr -d ' ')
+
+        SIZE_TOOL=$(find "$ANDROID_NDK_ROOT" -name "llvm-size" | head -1)
+        if [ -n "$SIZE_TOOL" ]; then
+          TEXT_SIZE=$("$SIZE_TOOL" "$LIB_FILE" | tail -1 | awk '{print $1}')
+        else
+          TEXT_SIZE="N/A"
+        fi
+
+        mkdir -p /tmp/size-report
+        echo "android-arm64,${{ matrix.crypto }},${{ matrix.mls }},$RAW_SIZE,$STRIPPED_SIZE,$FULL_STRIPPED_SIZE,$TEXT_SIZE" \
+          > /tmp/size-report/android-arm64-${{ matrix.crypto }}-mls${{ matrix.mls }}.csv
+
+    - name: Upload size data
+      uses: actions/upload-artifact@v4
+      with:
+        name: size-android-arm64-${{ matrix.crypto }}-mls${{ matrix.mls }}
+        path: /tmp/size-report/android-arm64-${{ matrix.crypto }}-mls${{ matrix.mls }}.csv
+
+  chromium-sim:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        mls: [ON, OFF]
+
+    env:
+      CMAKE_BUILD_DIR: ${{ github.workspace }}/build
+      CMAKE_GENERATOR: "Ninja"
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Dependencies
+      run: sudo apt-get install -y nasm lld
+
+    - name: Restore cache
+      uses: actions/cache@v4
+      with:
+        path: ${{ env.CMAKE_BUILD_DIR }}/vcpkg_installed
+        key: size-chromium-mls${{ matrix.mls }}-${{ hashFiles('**/vcpkg.json') }}
+
+    - name: Configure
+      run: |
+        cmake -B "${{ env.CMAKE_BUILD_DIR }}" \
+          -DCMAKE_C_COMPILER=clang \
+          -DCMAKE_CXX_COMPILER=clang++ \
+          -DCMAKE_BUILD_TYPE=MinSizeRel \
+          -DCMAKE_CXX_FLAGS="-fno-exceptions -fno-rtti -ffunction-sections -fdata-sections -fvisibility=hidden -fvisibility-inlines-hidden" \
+          -DCMAKE_C_FLAGS="-ffunction-sections -fdata-sections -fvisibility=hidden" \
+          -DTESTING=OFF -DCLANG_TIDY=OFF -DSANITIZERS=OFF \
+          -DSFRAME_MLS=${{ matrix.mls }} \
+          -DCMAKE_TOOLCHAIN_FILE="$VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" \
+          -DCRYPTO=BORINGSSL \
+          -DVCPKG_MANIFEST_DIR="alternatives/BORINGSSL"
+
+    - name: Build
+      run: cmake --build "${{ env.CMAKE_BUILD_DIR }}" --config MinSizeRel
+
+    - name: Measure static library
+      id: size-lib
+      shell: bash
+      run: |
+        LIB=$(find "${{ env.CMAKE_BUILD_DIR }}" -maxdepth 2 -name "libsframe.a" -print -quit)
+        if [ -z "$LIB" ]; then
+          echo "::error::Library not found"
+          exit 1
+        fi
+        echo "lib_path=$LIB" >> "$GITHUB_OUTPUT"
+
+        TEXT_SIZE=$(size "$LIB" | tail -1 | awk '{print $1}')
+        echo "text_size=$TEXT_SIZE" >> "$GITHUB_OUTPUT"
+
+        cp "$LIB" "$LIB.stripped"
+        strip --strip-all "$LIB.stripped"
+        STRIPPED_SIZE=$(wc -c < "$LIB.stripped" | tr -d ' ')
+        echo "stripped_size=$STRIPPED_SIZE" >> "$GITHUB_OUTPUT"
+
+    - name: Measure linked binary contribution
+      id: size-linked
+      shell: bash
+      run: |
+        LIB="${{ steps.size-lib.outputs.lib_path }}"
+
+        # Find BoringSSL from vcpkg
+        CRYPTO_LIB=$(find "${{ env.CMAKE_BUILD_DIR }}/vcpkg_installed" -name "libcrypto.a" -path "*/lib/*" ! -path "*/debug/*" -print -quit)
+        INCLUDE_DIR=$(find "${{ env.CMAKE_BUILD_DIR }}/vcpkg_installed" -name "include" -type d ! -path "*/debug/*" -print -quit)
+        BUILD_INCLUDE="${{ env.CMAKE_BUILD_DIR }}/include"
+        SRC_INCLUDE="${{ github.workspace }}/include"
+
+        COMMON_FLAGS="-Os -fno-exceptions -fno-rtti -ffunction-sections -fdata-sections -fvisibility=hidden -fvisibility-inlines-hidden"
+        COMMON_LDFLAGS="-fuse-ld=lld -Wl,--gc-sections -Wl,--icf=all"
+
+        echo "Using crypto lib: $CRYPTO_LIB"
+        echo "Using includes: $INCLUDE_DIR, $BUILD_INCLUDE, $SRC_INCLUDE"
+
+        # Baseline: empty main linked with BoringSSL (captures crypto overhead)
+        echo 'int main() { return 0; }' > /tmp/baseline.cpp
+        clang++ $COMMON_FLAGS $COMMON_LDFLAGS \
+          -o /tmp/baseline /tmp/baseline.cpp \
+          "$CRYPTO_LIB" -lpthread
+        strip --strip-all /tmp/baseline
+        BASELINE=$(wc -c < /tmp/baseline | tr -d ' ')
+        echo "baseline=$BASELINE"
+
+        # With sframe: exercises core API to pull in real code paths
+        cat > /tmp/with_sframe.cpp << 'SRCEOF'
+        #include <sframe/sframe.h>
+        #include <cstdint>
+        using namespace SFRAME_NAMESPACE;
+
+        volatile int sink;
+
+        int main() {
+            Context ctx(CipherSuite::AES_128_CTR_HMAC_SHA256_80);
+
+            uint8_t key_data[16] = {};
+            auto key = input_bytes(key_data, sizeof(key_data));
+            auto r0 = ctx.add_key(0, KeyUsage::protect, key);
+            auto r1 = ctx.add_key(1, KeyUsage::unprotect, key);
+
+            uint8_t pt[64] = {};
+            uint8_t ct[128] = {};
+            auto r2 = ctx.protect(0,
+                                  output_bytes(ct, sizeof(ct)),
+                                  input_bytes(pt, sizeof(pt)),
+                                  input_bytes(nullptr, 0));
+            auto r3 = ctx.unprotect(output_bytes(pt, sizeof(pt)),
+                                    input_bytes(ct, sizeof(ct)),
+                                    input_bytes(nullptr, 0));
+
+            sink = r0.is_ok() + r1.is_ok() +
+                   r2.is_ok() + r3.is_ok();
+
+        #ifdef SFRAME_MLS
+            MLSContext mls(CipherSuite::AES_128_CTR_HMAC_SHA256_80, 4);
+            uint8_t secret[32] = {};
+            auto r4 = mls.add_epoch(0, input_bytes(secret, sizeof(secret)));
+            auto r5 = mls.protect(0, 0,
+                                  output_bytes(ct, sizeof(ct)),
+                                  input_bytes(pt, sizeof(pt)),
+                                  input_bytes(nullptr, 0));
+            auto r6 = mls.unprotect(output_bytes(pt, sizeof(pt)),
+                                    input_bytes(ct, sizeof(ct)),
+                                    input_bytes(nullptr, 0));
+            sink += r4.is_ok() + r5.is_ok() + r6.is_ok();
+        #endif
+
+            return 0;
+        }
+        SRCEOF
+
+        MLS_FLAG=""
+        if [ "${{ matrix.mls }}" = "ON" ]; then
+          MLS_FLAG="-DSFRAME_MLS"
+        fi
+
+        clang++ $COMMON_FLAGS $COMMON_LDFLAGS \
+          -I"$SRC_INCLUDE" -I"$INCLUDE_DIR" -I"$BUILD_INCLUDE" \
+          $MLS_FLAG \
+          -o /tmp/with_sframe /tmp/with_sframe.cpp \
+          "$LIB" "$CRYPTO_LIB" -lpthread
+        strip --strip-all /tmp/with_sframe
+        WITH_SFRAME=$(wc -c < /tmp/with_sframe | tr -d ' ')
+        echo "with_sframe=$WITH_SFRAME"
+
+        DELTA=$((WITH_SFRAME - BASELINE))
+        echo "delta=$DELTA"
+
+        echo "baseline=$BASELINE" >> "$GITHUB_OUTPUT"
+        echo "with_sframe=$WITH_SFRAME" >> "$GITHUB_OUTPUT"
+        echo "linked_delta=$DELTA" >> "$GITHUB_OUTPUT"
+
+    - name: Write CSV row
+      shell: bash
+      run: |
+        mkdir -p /tmp/size-report
+        echo "chromium-sim,${{ matrix.mls }},${{ steps.size-lib.outputs.text_size }},${{ steps.size-lib.outputs.stripped_size }},${{ steps.size-linked.outputs.baseline }},${{ steps.size-linked.outputs.with_sframe }},${{ steps.size-linked.outputs.linked_delta }}" \
+          > /tmp/size-report/chromium-sim-mls${{ matrix.mls }}.csv
+
+    - name: Upload size data
+      uses: actions/upload-artifact@v4
+      with:
+        name: size-chromium-sim-mls${{ matrix.mls }}
+        path: /tmp/size-report/chromium-sim-mls${{ matrix.mls }}.csv
+
+  size-report:
+    needs: [build, android-build, chromium-sim]
+    runs-on: ubuntu-latest
+    steps:
+    - name: Download all size artifacts
+      uses: actions/download-artifact@v4
+      with:
+        pattern: size-*
+        merge-multiple: true
+        path: /tmp/size-data
+
+    - name: Generate report
+      shell: bash
+      run: |
+        to_kib() {
+          local bytes=$1
+          if [ "$bytes" = "N/A" ]; then
+            echo "N/A"
+          else
+            echo "$(( (bytes + 512) / 1024 )) KiB ($bytes B)"
+          fi
+        }
+
+        echo "## Binary Size Report" > /tmp/report.md
+        echo "" >> /tmp/report.md
+
+        # --- Standard builds table ---
+        echo "### Standard Builds (Release, stripped)" >> /tmp/report.md
+        echo "" >> /tmp/report.md
+        echo "| Platform | Crypto | MLS | Raw .a | strip --strip-debug | strip --strip-all | .text section |" >> /tmp/report.md
+        echo "|----------|--------|-----|--------|--------------------|--------------------|---------------|" >> /tmp/report.md
+
+        for csv in /tmp/size-data/*.csv; do
+          basename=$(basename "$csv")
+          # Skip chromium-sim CSVs
+          case "$basename" in chromium-sim*) continue ;; esac
+          while IFS=, read -r platform crypto mls raw stripped full_stripped text; do
+            echo "| $platform | $crypto | $mls | $(to_kib "$raw") | $(to_kib "$stripped") | $(to_kib "$full_stripped") | $(to_kib "$text") |" >> /tmp/report.md
+          done < "$csv"
+        done
+
+        echo "" >> /tmp/report.md
+
+        # --- Chromium-simulated builds table ---
+        echo "### Chromium-Simulated Build (clang, -Os, -fno-exceptions, -fno-rtti, gc-sections, ICF)" >> /tmp/report.md
+        echo "" >> /tmp/report.md
+        echo "| MLS | .text (lib) | stripped .a | Baseline binary | +sframe binary | **sframe linked delta** |" >> /tmp/report.md
+        echo "|-----|-------------|------------|-----------------|----------------|------------------------|" >> /tmp/report.md
+
+        for csv in /tmp/size-data/chromium-sim*.csv; do
+          [ -f "$csv" ] || continue
+          while IFS=, read -r label mls text_size stripped_size baseline with_sframe delta; do
+            echo "| $mls | $(to_kib "$text_size") | $(to_kib "$stripped_size") | $(to_kib "$baseline") | $(to_kib "$with_sframe") | **$(to_kib "$delta")** |" >> /tmp/report.md
+          done < "$csv"
+        done
+
+        echo "" >> /tmp/report.md
+        echo "**Legend:**" >> /tmp/report.md
+        echo "- **Standard builds**: Raw .a / stripped .a / .text section of the static archive" >> /tmp/report.md
+        echo "- **Chromium-simulated**: Built with Chromium-like flags (clang, -Os, -fno-exceptions, -fno-rtti, -fvisibility=hidden)" >> /tmp/report.md
+        echo "- **.text (lib)**: Code size in the static archive — **best estimate for Chromium**, where BoringSSL is already linked" >> /tmp/report.md
+        echo "- **sframe linked delta**: Binary size increase when linking sframe into a minimal program (with -Wl,--gc-sections -Wl,--icf=all via lld). Includes crypto functions pulled in by sframe." >> /tmp/report.md
+
+        echo ""
+        echo "===== SIZE REPORT ====="
+        cat /tmp/report.md
+
+    - name: Upload report
+      uses: actions/upload-artifact@v4
+      with:
+        name: binary-size-report
+        path: /tmp/report.md
