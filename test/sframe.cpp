@@ -5,10 +5,13 @@
 
 #include "common.h"
 
+#include <cstddef>
+#include <cstdint>
 #include <iostream>
 #include <map>       // for map
 #include <stdexcept> // for invalid_argument
 #include <string>    // for basic_string, operator==
+#include <vector>
 
 using namespace SFRAME_NAMESPACE;
 

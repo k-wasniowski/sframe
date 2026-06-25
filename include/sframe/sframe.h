@@ -1,7 +1,8 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
-#include <gsl/gsl-lite.hpp>
+#include <gsl-lite/gsl-lite.hpp>
 #include <optional>
 
 #include <sframe/map.h>
@@ -31,6 +32,8 @@
 #endif
 
 namespace SFRAME_NAMESPACE {
+
+namespace gsl = ::gsl_lite;
 
 #ifdef __cpp_exceptions
 struct crypto_error : std::runtime_error
