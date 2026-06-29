@@ -65,6 +65,12 @@ struct invalid_key_usage_error : std::runtime_error
   using parent = std::runtime_error;
   using parent::parent;
 };
+
+struct unknown_key_id_error : std::runtime_error
+{
+  using parent = std::runtime_error;
+  using parent::parent;
+};
 #endif
 
 enum class CipherSuite : uint16_t

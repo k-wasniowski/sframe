@@ -258,12 +258,12 @@ TEST_CASE("SFrame Context Remove Key")
   // Remove sender key and verify protect fails
   sender.remove_key(kid);
   CHECK(sender.protect(kid, ct_out, plaintext, metadata).error().type() ==
-        SFrameErrorType::invalid_parameter_error);
+        SFrameErrorType::unknown_key_id_error);
 
   // Remove receiver key and verify unprotect fails
   receiver.remove_key(kid);
   CHECK(receiver.unprotect(pt_out, encrypted, metadata).error().type() ==
-        SFrameErrorType::invalid_parameter_error);
+        SFrameErrorType::unknown_key_id_error);
 
   // Re-add keys and verify round-trip works again
   sender.add_key(kid, KeyUsage::protect, key).unwrap();
@@ -284,6 +284,73 @@ TEST_CASE("SFrame Context Remove Key - Nonexistent Key")
 
   // Removing a key that was never added should not throw
   CHECK_NOTHROW(ctx.remove_key(KeyID(0x99)));
+}
+
+TEST_CASE("SFrame Unknown Key")
+{
+  const auto suite = CipherSuite::AES_GCM_128_SHA256;
+  const auto kid = KeyID(0x42);
+  const auto unknown_kid = KeyID(0x43);
+  const auto key = from_hex("000102030405060708090a0b0c0d0e0f");
+  const auto plaintext = from_hex("00010203");
+  const auto metadata = bytes{};
+
+  auto pt_out = bytes(plaintext.size());
+  auto ct_out = bytes(plaintext.size() + Context::max_overhead);
+
+  auto sender = Context(suite);
+  sender.add_key(kid, KeyUsage::protect, key).unwrap();
+
+  // Protecting with a key ID that was never added fails with
+  // unknown_key_id_error
+  CHECK(
+    sender.protect(unknown_kid, ct_out, plaintext, metadata).error().type() ==
+    SFrameErrorType::unknown_key_id_error);
+
+  // Produce a valid ciphertext whose header references `kid`
+  auto encrypted =
+    to_bytes(sender.protect(kid, ct_out, plaintext, metadata).unwrap());
+
+  // A receiver that doesn't know `kid` fails to unprotect with
+  // unknown_key_id_error
+  auto receiver = Context(suite);
+  CHECK(receiver.unprotect(pt_out, encrypted, metadata).error().type() ==
+        SFrameErrorType::unknown_key_id_error);
+}
+
+TEST_CASE("SFrame Unknown Key Error Reports Key ID")
+{
+  const auto suite = CipherSuite::AES_GCM_128_SHA256;
+  const auto kid = KeyID(0x42);
+  const auto unknown_kid = KeyID(0x43);
+  const auto key = from_hex("000102030405060708090a0b0c0d0e0f");
+  const auto plaintext = from_hex("00010203");
+  const auto metadata = bytes{};
+
+  auto pt_out = bytes(plaintext.size());
+  auto ct_out = bytes(plaintext.size() + Context::max_overhead);
+
+  auto sender = Context(suite);
+  sender.add_key(kid, KeyUsage::protect, key).unwrap();
+
+  // Protecting with a key ID never added: error must name that key ID
+  auto protect_err =
+    sender.protect(unknown_kid, ct_out, plaintext, metadata).error();
+  CHECK(protect_err.type() == SFrameErrorType::unknown_key_id_error);
+  CHECK(protect_err.key_id().has_value());
+  CHECK(protect_err.key_id().value() == unknown_kid);
+
+  // Produce a ciphertext whose header embeds kid
+  auto encrypted =
+    to_bytes(sender.protect(kid, ct_out, plaintext, metadata).unwrap());
+
+  // Receiver with no keys: error must name the key ID parsed from the
+  // ciphertext
+  auto receiver = Context(suite);
+  auto unprotect_err = receiver.unprotect(pt_out, encrypted, metadata).error();
+  CHECK(unprotect_err.type() == SFrameErrorType::unknown_key_id_error);
+  CHECK(unprotect_err.key_id().has_value());
+  CHECK(unprotect_err.key_id().value() == kid);
 }
 
 TEST_CASE("MLS Remove Epoch")

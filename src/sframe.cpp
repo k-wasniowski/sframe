@@ -130,8 +130,8 @@ Result<void>
 Context::require_key(KeyID key_id) const
 {
   if (!keys.contains(key_id)) {
-    return SFrameError(SFrameErrorType::invalid_parameter_error,
-                       "Unknown key ID");
+    return SFrameError(
+      SFrameErrorType::unknown_key_id_error, "Unknown key ID", key_id);
   }
   return Result<void>::ok();
 }
