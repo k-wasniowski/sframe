@@ -3,7 +3,9 @@
 #include "crypto.h"
 #include "header.h"
 
+#include <algorithm>
 #include <limits>
+#include <utility>
 
 namespace SFRAME_NAMESPACE {
 

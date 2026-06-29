@@ -5,6 +5,10 @@
 
 #include <sframe/result.h>
 
+#include <algorithm>
+#include <memory>
+#include <utility>
+
 #include <openssl/err.h>
 #include <openssl/evp.h>
 #include <openssl/hkdf.h>

@@ -1,7 +1,17 @@
 #pragma once
 
-#include <gsl/gsl-lite.hpp>
+#include <algorithm>
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <gsl-lite/gsl-lite.hpp>
+#include <initializer_list>
 #include <namespace.h>
+#include <stdexcept>
+
+namespace SFRAME_NAMESPACE {
+namespace gsl = ::gsl_lite;
+}
 
 #ifdef NO_ALLOC
 
