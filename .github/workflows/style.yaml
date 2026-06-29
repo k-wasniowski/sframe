@@ -4,9 +4,11 @@ on:
   push:
     branches:
       - master
+      - v1
   pull_request:
     branches:
       - master
+      - v1
 
 jobs:
   build:
@@ -14,5 +16,6 @@ jobs:
     steps:
     - uses: actions/checkout@v1
     - name: check clang-format
-      uses: jidicula/clang-format-action@v2.0.0
-
+      uses: jidicula/clang-format-action@v4.15.0
+      with:
+        clang-format-version: '17'

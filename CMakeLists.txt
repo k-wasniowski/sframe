@@ -43,6 +43,11 @@ if (CMAKE_CXX_COMPILER_ID MATCHES "Clang" OR CMAKE_CXX_COMPILER_ID MATCHES "GNU"
 elseif(MSVC)
   add_compile_options(/W4 /WX)
 
+  # Do not let /WX promote warnings from system (third-party) headers such as
+  # gsl-lite, whose own deprecation warnings (e.g. C4875) would otherwise break
+  # the build. Pairs with marking the gsl include directory SYSTEM below.
+  add_compile_options(/external:W0)
+
   # MSVC helpfully recommends safer equivalents for things like
   # getenv, but they are not portable.
   add_definitions(-D_CRT_SECURE_NO_WARNINGS)
@@ -99,8 +104,9 @@ set_directory_properties( PROPERTIES EP_PREFIX ${CMAKE_BINARY_DIR}/third_party )
 ExternalProject_Add(
     gsl-extern
     GIT_REPOSITORY ${GSL_LITE_URL}
+    GIT_TAG v0.37.0
     TIMEOUT 10
-    UPDATE_COMMAND ${GIT_EXECUTABLE} pull
+    UPDATE_COMMAND ""
     CONFIGURE_COMMAND ""
     BUILD_COMMAND ""
     INSTALL_COMMAND ""
@@ -112,7 +118,9 @@ set( GSL_LITE_INCLUDE_DIR ${SOURCE_DIR}/include CACHE INTERNAL "Include folder f
 
 add_library( gsl INTERFACE )
 add_dependencies(gsl gsl-extern)
-target_include_directories( gsl INTERFACE ${GSL_LITE_INCLUDE_DIR} )
+# Treat gsl-lite as a system include so our -Werror / /WX do not turn its own
+# (third-party) deprecation warnings into build failures.
+target_include_directories( gsl SYSTEM INTERFACE ${GSL_LITE_INCLUDE_DIR} )
 
 ###
 ### Library Config

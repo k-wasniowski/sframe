@@ -75,8 +75,7 @@ hkdf_extract(CipherSuite suite, const bytes& salt, const bytes& ikm)
 
   const auto params = std::array<OSSL_PARAM, 5>{
     OSSL_PARAM_construct_int(OSSL_KDF_PARAM_MODE, &mode),
-    OSSL_PARAM_construct_utf8_string(
-      OSSL_KDF_PARAM_DIGEST, digest_name, 0),
+    OSSL_PARAM_construct_utf8_string(OSSL_KDF_PARAM_DIGEST, digest_name, 0),
     OSSL_PARAM_construct_octet_string(OSSL_KDF_PARAM_KEY, ikm_ptr, ikm.size()),
     OSSL_PARAM_construct_octet_string(
       OSSL_KDF_PARAM_SALT, salt_ptr, salt.size()),
@@ -111,8 +110,7 @@ hkdf_expand(CipherSuite suite, const bytes& prk, const bytes& info, size_t size)
 
   const auto params = std::array<OSSL_PARAM, 5>{
     OSSL_PARAM_construct_int(OSSL_KDF_PARAM_MODE, &mode),
-    OSSL_PARAM_construct_utf8_string(
-      OSSL_KDF_PARAM_DIGEST, digest_name, 0),
+    OSSL_PARAM_construct_utf8_string(OSSL_KDF_PARAM_DIGEST, digest_name, 0),
     OSSL_PARAM_construct_octet_string(OSSL_KDF_PARAM_KEY, prk_ptr, prk.size()),
     OSSL_PARAM_construct_octet_string(
       OSSL_KDF_PARAM_INFO, info_ptr, info.size()),
@@ -148,11 +146,9 @@ compute_tag(CipherSuite suite,
     std::unique_ptr<EVP_MAC_CTX, decltype(&EVP_MAC_CTX_free)>;
 
   auto digest_name = const_cast<char*>(openssl_digest_name(suite));
-  std::array<OSSL_PARAM, 2> params = {
-    OSSL_PARAM_construct_utf8_string(
-      OSSL_ALG_PARAM_DIGEST, digest_name, 0),
-    OSSL_PARAM_construct_end()
-  };
+  std::array<OSSL_PARAM, 2> params = { OSSL_PARAM_construct_utf8_string(
+                                         OSSL_ALG_PARAM_DIGEST, digest_name, 0),
+                                       OSSL_PARAM_construct_end() };
 
   const auto mac = scoped_evp_mac(
     EVP_MAC_fetch(nullptr, OSSL_MAC_NAME_HMAC, nullptr), EVP_MAC_free);

@@ -2,9 +2,9 @@
 
 #include "crypto.h"
 
-#include <openssl/hmac.h>
 #include <openssl/err.h>
 #include <openssl/evp.h>
+#include <openssl/hmac.h>
 
 namespace SFRAME_NAMESPACE {
 
@@ -22,7 +22,8 @@ using scoped_hmac_ctx = std::unique_ptr<HMAC_CTX, decltype(&HMAC_CTX_free)>;
 
 openssl_error::openssl_error()
   : std::runtime_error(ERR_error_string(ERR_get_error(), nullptr))
-{}
+{
+}
 
 static const EVP_MD*
 openssl_digest_type(CipherSuite suite)
@@ -92,7 +93,6 @@ struct HMAC
   scoped_hmac_ctx ctx;
   std::array<uint8_t, EVP_MAX_MD_SIZE> md;
 };
-
 
 HMAC::HMAC(CipherSuite suite, input_bytes key)
   : ctx(HMAC_CTX_new(), HMAC_CTX_free)
