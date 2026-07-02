@@ -78,8 +78,7 @@ KeyRecord::from_base_key(CipherSuite suite,
 
 Context::Context(CipherSuite suite_in)
   : suite(suite_in)
-{
-}
+{}
 
 Context::~Context() = default;
 
@@ -419,8 +418,8 @@ MLSContext::ensure_key(KeyID key_id, KeyUsage usage)
   const auto epoch_index = key_id & epoch_mask;
   auto& epoch = epoch_cache[epoch_index];
   if (!epoch) {
-    return SFrameError(SFrameErrorType::invalid_parameter_error,
-                       "Unknown epoch");
+    return SFrameError(
+      SFrameErrorType::unknown_key_id_error, "Unknown key ID", key_id);
   }
 
   if (keys.contains(key_id)) {

@@ -103,8 +103,7 @@ private:
   ValueOrLength(bool is_length_in, uint8_t value_or_length_in)
     : is_length(is_length_in)
     , value_or_length(value_or_length_in)
-  {
-  }
+  {}
 };
 
 struct ConfigByte
@@ -115,14 +114,12 @@ struct ConfigByte
   ConfigByte(uint64_t kid_in, uint64_t ctr_in)
     : kid(ValueOrLength::for_u64(kid_in))
     , ctr(ValueOrLength::for_u64(ctr_in))
-  {
-  }
+  {}
 
   explicit ConfigByte(uint8_t encoded)
     : kid(ValueOrLength::decode(encoded >> 4))
     , ctr(ValueOrLength::decode(encoded & 0x0f))
-  {
-  }
+  {}
 
   size_t encoded_size() const
   {
@@ -178,8 +175,7 @@ Header::Header(KeyID key_id_in, Counter counter_in, input_bytes encoded_in)
   : key_id(key_id_in)
   , counter(counter_in)
   , _encoded(encoded_in)
-{
-}
+{}
 
 #if 0
 std::tuple<Header, input_bytes>

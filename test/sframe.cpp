@@ -223,7 +223,7 @@ TEST_CASE("MLS Failure after Purge")
           .error()
           .type() == SFrameErrorType::invalid_parameter_error);
   CHECK(member_b.unprotect(pt_out, enc_ab_1_data, metadata).error().type() ==
-        SFrameErrorType::invalid_parameter_error);
+        SFrameErrorType::unknown_key_id_error);
 
   const auto enc_ab_2 =
     member_a.protect(epoch_id_2, sender_id_a, ct_out, plaintext, metadata)
@@ -394,7 +394,7 @@ TEST_CASE("MLS Remove Epoch")
           .error()
           .type() == SFrameErrorType::invalid_parameter_error);
   CHECK(member_b.unprotect(pt_out, enc_data, metadata).error().type() ==
-        SFrameErrorType::invalid_parameter_error);
+        SFrameErrorType::unknown_key_id_error);
 
   // Epoch 2 should still work
   enc = member_a.protect(epoch_id_2, sender_id, ct_out, plaintext, metadata)

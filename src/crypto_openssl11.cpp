@@ -26,8 +26,7 @@ using scoped_hmac_ctx = std::unique_ptr<HMAC_CTX, decltype(&HMAC_CTX_free)>;
 #ifdef __cpp_exceptions
 crypto_error::crypto_error()
   : std::runtime_error(ERR_error_string(ERR_get_error(), nullptr))
-{
-}
+{}
 #endif
 
 static Result<const EVP_MD*>
@@ -79,8 +78,7 @@ private:
 
   explicit HMAC(scoped_hmac_ctx ctx_)
     : ctx(std::move(ctx_))
-  {
-  }
+  {}
 
 public:
   HMAC(HMAC&&) noexcept = default;
