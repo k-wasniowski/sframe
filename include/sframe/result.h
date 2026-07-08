@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <optional>
 #include <type_traits>
 #include <utility>
@@ -19,6 +20,7 @@ enum class SFrameErrorType
   unsupported_ciphersuite_error,
   authentication_error,
   invalid_key_usage_error,
+  unknown_key_id_error,
 };
 
 class SFrameError
@@ -36,6 +38,13 @@ public:
   {
   }
 
+  SFrameError(SFrameErrorType type, const char* message, uint64_t key_id)
+    : type_(type)
+    , message_(message)
+    , key_id_(key_id)
+  {
+  }
+
   SFrameError(const SFrameError& other) = default;
   SFrameError(SFrameError&& other) noexcept = default;
   SFrameError& operator=(SFrameError&& other) noexcept = default;
@@ -44,11 +53,15 @@ public:
 
   const char* message() const { return message_; }
 
+  // Populated only when type() == SFrameErrorType::unknown_key_id_error.
+  std::optional<uint64_t> key_id() const { return key_id_; }
+
 private:
   SFrameErrorType type_;
   // Message storage is borrowed; callers must pass a string with static or
   // otherwise stable lifetime.
   const char* message_ = nullptr;
+  std::optional<uint64_t> key_id_ = std::nullopt;
 };
 
 #ifdef __cpp_exceptions
