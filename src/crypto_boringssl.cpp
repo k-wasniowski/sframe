@@ -20,7 +20,8 @@ namespace SFRAME_NAMESPACE {
 #ifdef __cpp_exceptions
 crypto_error::crypto_error()
   : std::runtime_error(ERR_error_string(ERR_get_error(), nullptr))
-{}
+{
+}
 #endif
 
 static Result<const EVP_MD*>

@@ -78,7 +78,8 @@ KeyRecord::from_base_key(CipherSuite suite,
 
 Context::Context(CipherSuite suite_in)
   : suite(suite_in)
-{}
+{
+}
 
 Context::~Context() = default;
 

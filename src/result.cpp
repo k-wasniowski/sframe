@@ -5,11 +5,13 @@ namespace SFRAME_NAMESPACE {
 #ifdef __cpp_exceptions
 unsupported_ciphersuite_error::unsupported_ciphersuite_error()
   : std::runtime_error("Unsupported ciphersuite")
-{}
+{
+}
 
 authentication_error::authentication_error()
   : std::runtime_error("AEAD authentication failure")
-{}
+{
+}
 
 void
 throw_sframe_error(const SFrameError& error)

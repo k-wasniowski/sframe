@@ -28,18 +28,21 @@ public:
   SFrameError(SFrameErrorType type)
     : type_(type)
     , message_(nullptr)
-  {}
+  {
+  }
 
   SFrameError(SFrameErrorType type, const char* message)
     : type_(type)
     , message_(message)
-  {}
+  {
+  }
 
   SFrameError(SFrameErrorType type, const char* message, uint64_t key_id)
     : type_(type)
     , message_(message)
     , key_id_(key_id)
-  {}
+  {
+  }
 
   SFrameError(const SFrameError& other) = default;
   SFrameError(SFrameError&& other) noexcept = default;
@@ -76,15 +79,18 @@ public:
 
   Result(SFrameError error)
     : data_(std::move(error))
-  {}
+  {
+  }
 
   Result(SFrameErrorType error)
     : data_(SFrameError(error))
-  {}
+  {
+  }
 
   Result(T value)
     : data_(std::move(value))
-  {}
+  {
+  }
 
   Result(const Result& other) = delete;
   Result& operator=(const Result& other) = delete;
@@ -132,11 +138,13 @@ public:
 
   Result(SFrameError error)
     : error_(std::move(error))
-  {}
+  {
+  }
 
   Result(SFrameErrorType error)
     : error_(SFrameError(error))
-  {}
+  {
+  }
 
   Result() = default;
 
