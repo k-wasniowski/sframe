@@ -4,6 +4,7 @@
 #include <iosfwd>
 #include <map>
 #include <memory>
+#include <stdexcept>
 #include <vector>
 
 #include <namespace.h>
