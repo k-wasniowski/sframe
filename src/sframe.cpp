@@ -71,7 +71,8 @@ KeyRecord::from_base_key(CipherSuite suite,
   SFRAME_VALUE_OR_RETURN(salt,
                          hkdf_expand(suite, secret, salt_label, nonce_size));
 
-  return KeyRecord{ key, salt, usage, 0 };
+  SFRAME_VALUE_OR_RETURN(prepared, prepare_key(suite, key));
+  return KeyRecord{ key, salt, usage, 0, prepared };
 }
 
 ///
@@ -80,8 +81,7 @@ KeyRecord::from_base_key(CipherSuite suite,
 
 Context::Context(CipherSuite suite_in)
   : suite(suite_in)
-{
-}
+{}
 
 Context::~Context() = default;
 
@@ -202,7 +202,13 @@ Context::protect_inner(const Header& header,
 
   SFRAME_VALUE_OR_RETURN(aad, form_aad(header, metadata));
   const auto nonce = form_nonce(header.counter, key_and_salt.salt);
-  return seal(suite, key_and_salt.key, nonce, ciphertext, aad, plaintext);
+  return seal(suite,
+              key_and_salt.prepared,
+              key_and_salt.key,
+              nonce,
+              ciphertext,
+              aad,
+              plaintext);
 }
 
 Result<output_bytes>
@@ -231,7 +237,13 @@ Context::unprotect_inner(const Header& header,
 
   SFRAME_VALUE_OR_RETURN(aad, form_aad(header, metadata));
   const auto nonce = form_nonce(header.counter, key_and_salt.salt);
-  return open(suite, key_and_salt.key, nonce, plaintext, aad, ciphertext);
+  return open(suite,
+              key_and_salt.prepared,
+              key_and_salt.key,
+              nonce,
+              plaintext,
+              aad,
+              ciphertext);
 }
 
 ///

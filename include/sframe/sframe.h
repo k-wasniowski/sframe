@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <optional>
 
 #include <sframe/map.h>
@@ -96,6 +97,9 @@ using KeyID = uint64_t;
 using Counter = uint64_t;
 class Header;
 
+// Crypto-backend-specific precomputed key material (opaque)
+struct CryptoKey;
+
 enum struct KeyUsage
 {
   protect,
@@ -117,6 +121,7 @@ struct KeyRecord
   owned_bytes<max_salt_size> salt;
   KeyUsage usage;
   Counter counter;
+  std::shared_ptr<const CryptoKey> prepared;
 };
 
 // Context applies the full SFrame transform.  It tracks a counter for each key

@@ -3,6 +3,8 @@
 #include <sframe/result.h>
 #include <sframe/sframe.h>
 
+#include <memory>
+
 namespace SFRAME_NAMESPACE {
 
 Result<size_t>
@@ -38,6 +40,31 @@ hkdf_expand(CipherSuite suite, input_bytes prk, input_bytes info, size_t size);
 ///
 /// AEAD Algorithms
 ///
+
+// Precompute per-key state (key schedules, keyed MAC contexts, etc.) so that it
+// does not have to be rebuilt for every frame.  Backends with nothing to cache
+// return a null pointer, in which case seal / open fall back to using the raw
+// key.
+Result<std::shared_ptr<const CryptoKey>>
+prepare_key(CipherSuite suite, input_bytes key);
+
+Result<output_bytes>
+seal(CipherSuite suite,
+     const std::shared_ptr<const CryptoKey>& prepared,
+     input_bytes key,
+     input_bytes nonce,
+     output_bytes ct,
+     input_bytes aad,
+     input_bytes pt);
+
+Result<output_bytes>
+open(CipherSuite suite,
+     const std::shared_ptr<const CryptoKey>& prepared,
+     input_bytes key,
+     input_bytes nonce,
+     output_bytes pt,
+     input_bytes aad,
+     input_bytes ct);
 
 Result<output_bytes>
 seal(CipherSuite suite,

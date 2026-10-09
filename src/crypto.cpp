@@ -146,6 +146,39 @@ validate_ctr_size(size_t size)
   return Result<void>::ok();
 }
 
+#if !defined(BORINGSSL)
+// Only the BoringSSL backend caches per-key state
+Result<std::shared_ptr<const CryptoKey>>
+prepare_key(CipherSuite /* suite */, input_bytes /* key */)
+{
+  return std::shared_ptr<const CryptoKey>();
+}
+
+Result<output_bytes>
+seal(CipherSuite suite,
+     const std::shared_ptr<const CryptoKey>& /* prepared */,
+     input_bytes key,
+     input_bytes nonce,
+     output_bytes ct,
+     input_bytes aad,
+     input_bytes pt)
+{
+  return seal(suite, key, nonce, ct, aad, pt);
+}
+
+Result<output_bytes>
+open(CipherSuite suite,
+     const std::shared_ptr<const CryptoKey>& /* prepared */,
+     input_bytes key,
+     input_bytes nonce,
+     output_bytes pt,
+     input_bytes aad,
+     input_bytes ct)
+{
+  return open(suite, key, nonce, pt, aad, ct);
+}
+#endif
+
 void
 clear_openssl_errors()
 {
